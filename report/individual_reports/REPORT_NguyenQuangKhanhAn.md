@@ -97,4 +97,3 @@ pip install -r requirements.txt
 python -m src.agent.run_ecommerce_agent "iPhone 15 case"
 ```
 
-Replace the student metadata at the top and save as `REPORT_[YOUR_NAME].md` before submission.
