@@ -1,6 +1,7 @@
 import ast
 import json
 import re
+from datetime import datetime
 from typing import List, Dict, Any, Optional, Type
 
 from pydantic import BaseModel
@@ -26,6 +27,27 @@ def _extract_json(text: str) -> Optional[str]:
     if start == -1 or end == -1 or end <= start:
         return None
     return cleaned[start : end + 1]
+
+
+def _extract_price(text: str) -> Optional[float]:
+    match = re.search(r"(?:Price:\s*)?\$\s*([0-9]+(?:\.[0-9]+)?)", text, re.IGNORECASE)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def _extract_rating(text: str) -> Optional[float]:
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*out of\s*5(?:\s*stars)?", text, re.IGNORECASE)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def _extract_review_count(text: str) -> Optional[int]:
+    match = re.search(r"([0-9][0-9,]*)\s*ratings?", text, re.IGNORECASE)
+    if match:
+        return int(match.group(1).replace(",", ""))
+    return None
 
 
 class ReActAgent:
@@ -164,8 +186,110 @@ JSON schema example:
             raise ValueError(f"No JSON object found in: {raw_text[:200]!r}")
 
         payload = json.loads(json_text)
+        if not payload.get("timestamp"):
+            payload["timestamp"] = datetime.utcnow().isoformat()
         model = self.output_schema.model_validate(payload)
         return model.model_dump_json(indent=2, ensure_ascii=False)
+
+    def _enrich_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        step_count: int,
+        latency_ms: int,
+        observations: List[str],
+    ) -> Dict[str, Any]:
+        enriched = dict(payload)
+        enriched.setdefault("timestamp", datetime.utcnow().isoformat())
+        enriched.setdefault("model", self.llm.model_name)
+        provider_name = getattr(self.llm, "provider_name", None)
+        if not provider_name:
+            provider_name = self.llm.__class__.__name__.replace("Provider", "").lower()
+        enriched.setdefault("provider", provider_name)
+        enriched.setdefault("steps", step_count)
+        enriched.setdefault("latency_ms", latency_ms)
+        enriched.setdefault("tool_calls", len(observations))
+        enriched.setdefault("observations_count", len(observations))
+        return enriched
+
+    def _build_fallback_report(
+        self,
+        user_input: str,
+        observations: List[str],
+        *,
+        step_count: int,
+        latency_ms: int,
+    ) -> str:
+        items: List[Dict[str, Any]] = []
+
+        for observation_text in observations:
+            try:
+                parsed_observation = json.loads(observation_text)
+            except Exception:
+                continue
+
+            if not isinstance(parsed_observation, list):
+                continue
+
+            for result in parsed_observation:
+                if not isinstance(result, dict):
+                    continue
+
+                title = str(result.get("title") or "").strip()
+                snippet = str(result.get("snippet") or "").strip()
+                source = str(result.get("source") or "unknown").strip()
+                url = result.get("url")
+
+                text_blob = f"{title} {snippet}"
+                price = _extract_price(text_blob)
+                rating = _extract_rating(text_blob)
+                review_count = _extract_review_count(text_blob)
+
+                if not title or title.lower().startswith("no results"):
+                    continue
+
+                notes_parts = []
+                if snippet:
+                    notes_parts.append(snippet)
+                if price is not None:
+                    notes_parts.append(f"price={price}")
+                if rating is not None:
+                    notes_parts.append(f"rating={rating}")
+                if review_count is not None:
+                    notes_parts.append(f"reviews={review_count}")
+
+                items.append(
+                    {
+                        "product_name": title,
+                        "source": source,
+                        "price": price,
+                        "rating": rating,
+                        "review_count": review_count,
+                        "url": url,
+                        "notes": "; ".join(notes_parts) if notes_parts else None,
+                    }
+                )
+
+        if items:
+            summary = f"Found {len(items)} competitor result(s) for {user_input}."
+        else:
+            summary = f"No reliably parsed competitor results found for {user_input}."
+
+        fallback_payload = {
+            "query": user_input,
+            "items": items,
+            "summary": summary,
+        }
+
+        fallback_payload = self._enrich_payload(
+            fallback_payload,
+            step_count=step_count,
+            latency_ms=latency_ms,
+            observations=observations,
+        )
+
+        validated = self.output_schema.model_validate(fallback_payload)
+        return validated.model_dump_json(indent=2, ensure_ascii=False)
 
     def run(self, user_input: str) -> str:
         logger.log_event("AGENT_START", {"input": user_input, "model": self.llm.model_name})
@@ -174,26 +298,35 @@ JSON schema example:
         scratchpad: List[str] = [f"User input: {user_input}"]
         current_prompt = user_input
         last_response = ""
+        observations: List[str] = []
+        step_latencies: List[int] = []
 
         for step in range(1, self.max_steps + 1):
-            if not response or not response.strip():
+            result = self.llm.generate(current_prompt, system_prompt=self.get_system_prompt())
+            last_response = (result.get("content") or "").strip()
+            step_latency_ms = int(result.get("latency_ms") or 0)
+            step_latencies.append(step_latency_ms)
+
+            if not last_response:
                 logger.log_event(
                     "AGENT_EMPTY_RESPONSE",
                     {"step": step}
                 )
 
-                return {
-                    "success": False,
-                    "error": "LLM returned empty response"
-                }
+                scratchpad.append(
+                    "[System] The model returned an empty response. "
+                    "Please continue and output either Action or Final Answer."
+                )
+                current_prompt = "\n\n".join(scratchpad)
+                continue
 
             # Track performance metrics if usage data is available (OpenAI/Gemini providers)
-            if "usage" in result and result["usage"]:
+            if result.get("usage"):
                 tracker.track_request(
                     provider=result.get("provider", self.llm.model_name),
                     model=self.llm.model_name,
                     usage=result["usage"],
-                    latency_ms=result.get("latency_ms", 0),
+                    latency_ms=step_latency_ms,
                 )
 
             logger.log_event(
@@ -209,7 +342,15 @@ JSON schema example:
             final_answer = self._parse_final_answer(last_response)
             if final_answer:
                 try:
-                    validated = self._validate_output(final_answer)
+                    payload = json.loads(_extract_json(final_answer) or "{}")
+                    payload = self._enrich_payload(
+                        payload,
+                        step_count=step,
+                        latency_ms=sum(step_latencies),
+                        observations=observations,
+                    )
+                    validated = self.output_schema.model_validate(payload)
+                    validated = validated.model_dump_json(indent=2, ensure_ascii=False)
                     logger.log_event("AGENT_END", {"steps": step, "status": "validated"})
                     return validated
                 except Exception as exc:
@@ -243,6 +384,7 @@ JSON schema example:
                 # KEY: append both Thought/Action AND Observation so LLM "remembers" on next step
                 scratchpad.append(last_response.strip())
                 scratchpad.append(f"Observation: {observation}")
+                observations.append(observation)
                 current_prompt = "\n\n".join(scratchpad)
                 continue
 
@@ -259,7 +401,24 @@ JSON schema example:
             "AGENT_END",
             {"steps": self.max_steps, "status": "max_steps_reached"},
         )
-        return last_response or "No final answer produced."
+        try:
+            fallback = self._build_fallback_report(
+                user_input,
+                observations,
+                step_count=self.max_steps,
+                latency_ms=sum(step_latencies),
+            )
+            logger.log_event(
+                "AGENT_FALLBACK",
+                {"steps": self.max_steps, "status": "compiled_from_observations", "items": len(observations)},
+            )
+            return fallback
+        except Exception as exc:
+            logger.log_event(
+                "AGENT_FALLBACK_ERROR",
+                {"steps": self.max_steps, "error": str(exc), "last_response": last_response[:300]},
+            )
+            return last_response or "No final answer produced."
 
     def _execute_tool(self, tool_name: str, args: str) -> str:
         """Find tool by name and call it with parsed arguments."""

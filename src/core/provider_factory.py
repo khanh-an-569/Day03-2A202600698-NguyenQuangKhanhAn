@@ -42,22 +42,25 @@ def get_provider_from_env() -> LLMProvider:
         return GeminiProvider(model_name=model, api_key=api_key)
 
     if provider == "mimo":
-        api_key = os.getenv("MIMO_API_KEY")
+        model = os.getenv("DEFAULT_MODEL", "mimo-v2.5-pro")
 
-    if not api_key:
-        raise ValueError(
-            "MIMO_API_KEY not set in .env for mimo provider"
+        api_keys = [
+            os.getenv("MIMO_API_KEY_1"),
+            os.getenv("MIMO_API_KEY_2"),
+            os.getenv("MIMO_API_KEY"),
+        ]
+        api_keys = [key for key in api_keys if key]
+
+        if not api_keys:
+            raise ValueError(
+                "No Mimo API key found. Set MIMO_API_KEY_1 and/or MIMO_API_KEY_2 (or MIMO_API_KEY) in .env"
+            )
+
+        return MimoProvider(
+            model_name=model,
+            api_keys=api_keys,
+            api_key=api_keys[0],
         )
-
-    model = os.getenv(
-        "DEFAULT_MODEL",
-        "mimo-v2.5-pro"
-    )
-
-    return MimoProvider(
-        model_name=model,
-        api_key=api_key
-    )
 
     raise ValueError(
         f"Unsupported DEFAULT_PROVIDER: '{provider}'. "
