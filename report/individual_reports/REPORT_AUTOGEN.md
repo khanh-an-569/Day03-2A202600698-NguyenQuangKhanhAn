@@ -1,7 +1,7 @@
 # Individual Report: Lab 3 - Chatbot vs ReAct Agent
 
-- **Student Name**: Nguyễn Quang Khánh An
-- **Student ID**: 2A202600698
+- **Student Name**: [Please fill your name]
+- **Student ID**: [Please fill your ID]
 - **Date**: 2026-06-01
 
 ---

@@ -1,0 +1,9 @@
+# ví dụ spec (đưa cho sinh viên)
+{
+  "name": "check_stock",
+  "description": "Trả về số lượng tồn kho cho item_name (string). Nếu không tìm thấy trả về 0.",
+  "inputs": {"item_name": "str"},
+  "outputs": {"quantity": "int"},
+  "failure_behavior": "return 0 and log 'NOT_FOUND'",
+  "example": "check_stock('iPhone 14') -> 3"
+}
