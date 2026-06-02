@@ -24,7 +24,7 @@ def build_agent() -> ReActAgent:
     ]
 
     # Read max_steps from env so it can be tuned without code changes
-    max_steps = int(os.getenv("AGENT_MAX_STEPS", "5"))
+    max_steps = int(os.getenv("AGENT_MAX_STEPS", "3"))
     return ReActAgent(llm=llm, tools=tools, max_steps=max_steps)
 
 

@@ -1,96 +1,75 @@
-import html
+import os
 import re
 from typing import List, Dict, Any
-from urllib.parse import parse_qs, unquote, urlparse
 
-import requests
+from tavily import TavilyClient
+
+def _tavily_web_search(query: str, max_results: int) -> List[Dict[str, Any]]:
+    """
+    Call Tavily Search API with advanced search depth.
+    Returns structured results with real URLs and snippets.
+    """
+    api_key = os.getenv("TAVILY_API_KEY")
+    if not api_key:
+        return []
+
+    try:
+        client = TavilyClient(api_key=api_key)
+        response = client.search(
+            query=query,
+            search_depth="advanced",
+            max_results=max_results,
+            include_answer=False,
+            include_raw_content=False,
+        )
+    except Exception:
+        return []
+
+    results: List[Dict[str, Any]] = []
+    for item in response.get("results", [])[:max_results]:
+        url = item.get("url")
+        title = item.get("title") or ""
+        snippet = item.get("content") or item.get("snippet") or ""
+
+        if not url or not title:
+            continue
+
+        domain_match = re.search(r"https?://(?:www\.)?([^/]+)", url)
+        source = domain_match.group(1) if domain_match else "tavily"
+
+        results.append({
+            "title": title,
+            "url": url,
+            "snippet": snippet,
+            "source": source,
+        })
+
+    return results
 
 
-DDG_URL = "https://html.duckduckgo.com/html/"
-
-
-def _clean_text(value: str) -> str:
-    value = re.sub(r"<[^>]+>", " ", value)
-    value = html.unescape(value)
-    value = re.sub(r"\s+", " ", value)
-    return value.strip()
-
-
-def _normalize_url(url: str) -> str:
-    parsed = urlparse(url)
-    if parsed.path == "/l/":
-        query = parse_qs(parsed.query)
-        if "uddg" in query and query["uddg"]:
-            return unquote(query["uddg"][0])
-    return url
-
+# ── Public interface ──────────────────────────────────────────────────────────
 
 def web_search(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
     """
-    Lightweight DuckDuckGo HTML search.
+    Search the web and return structured results with real URLs and snippets.
 
-    Returns a list of structured search results that can be fed back into a ReAct agent.
+    Strategy (tried in order):
+      1. Tavily Search API with advanced depth         — requires TAVILY_API_KEY
+
+    Each result dict has: title, url, snippet, source.
     """
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        )
-    }
+    results = _tavily_web_search(query, max_results)
+    if results:
+        return results
 
-    try:
-        response = requests.post(
-            DDG_URL,
-            data={"q": query},
-            headers=headers,
-            timeout=15,
-        )
-        response.raise_for_status()
-    except Exception as exc:
-        return [
-            {
-                "title": "Search failed",
-                "url": None,
-                "snippet": f"Unable to query DuckDuckGo: {exc}",
-                "source": "duckduckgo",
-            }
-        ]
-
-    html_text = response.text
-    blocks = re.findall(r'<div class="result__body[^>]*>(.*?)</div>\s*</div>', html_text, re.S)
-    results: List[Dict[str, Any]] = []
-
-    for block in blocks:
-        if len(results) >= max_results:
-            break
-
-        title_match = re.search(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block, re.S)
-        snippet_match = re.search(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', block, re.S)
-
-        if not title_match:
-            continue
-
-        url = _normalize_url(html.unescape(title_match.group(1)))
-        title = _clean_text(title_match.group(2))
-        snippet = _clean_text(snippet_match.group(1)) if snippet_match else ""
-
-        results.append(
-            {
-                "title": title,
-                "url": url,
-                "snippet": snippet,
-                "source": "duckduckgo",
-            }
-        )
-
-    if not results:
-        results.append(
-            {
-                "title": "No results parsed",
-                "url": None,
-                "snippet": f"DuckDuckGo returned content for query: {query}, but no results were parsed.",
-                "source": "duckduckgo",
-            }
-        )
-
-    return results
+    # Tavily unavailable
+    return [{
+        "title":   "Search unavailable",
+        "url":     None,
+        "snippet": (
+            f"Could not retrieve live results for '{query}'. "
+            "No TAVILY_API_KEY found or API unreachable. "
+            "Use your training knowledge and mark all data as estimated."
+        ),
+        "source":  "tavily",
+    }]

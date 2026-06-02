@@ -1,7 +1,7 @@
 import time
 from typing import Dict, Any, Optional, Generator, List
 
-from openai import OpenAI, RateLimitError
+from openai import OpenAI
 
 from src.core.llm_provider import LLMProvider
 
@@ -69,7 +69,7 @@ class MimoProvider(LLMProvider):
 
         last_error: Optional[Exception] = None
 
-        for attempt, api_key in enumerate(self._iter_api_keys(), start=1):
+        for api_key in self._iter_api_keys():
             client = self._get_client(api_key)
             try:
                 response = client.chat.completions.create(
@@ -80,12 +80,8 @@ class MimoProvider(LLMProvider):
                 )
                 break
 
-            except RateLimitError as exc:
+            except Exception as exc:
                 last_error = exc
-                if attempt >= len(self.api_keys):
-                    raise
-
-                time.sleep(2)
                 continue
         else:
             if last_error:
@@ -128,7 +124,7 @@ class MimoProvider(LLMProvider):
 
         last_error: Optional[Exception] = None
 
-        for attempt, api_key in enumerate(self._iter_api_keys(), start=1):
+        for api_key in self._iter_api_keys():
             client = self._get_client(api_key)
             try:
                 stream = client.chat.completions.create(
@@ -146,11 +142,9 @@ class MimoProvider(LLMProvider):
                         yield chunk.choices[0].delta.content
                 return
 
-            except RateLimitError as exc:
+            except Exception as exc:
                 last_error = exc
-                if attempt >= len(self.api_keys):
-                    raise
-                time.sleep(2)
+                continue
 
         if last_error:
             raise last_error
